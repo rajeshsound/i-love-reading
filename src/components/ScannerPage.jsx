@@ -71,32 +71,40 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
     setIsLookingUp(true);
     setStatus({ message: `Looking up ISBN ${isbn}…`, type: 'loading' });
 
-    try {
-      let book = await lookupISBN(isbn);
-      if (!book) {
-        book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
-        setStatus({ message: `Not found in Google Books — added manually`, type: 'info' });
-      } else {
-        setStatus({ message: `✓ ${book.title || isbn} — ready for next scan`, type: 'success' });
-      }
-      book.dateAdded = new Date().toLocaleDateString('en-IN');
+    // Always build a fallback book — scan is never lost even if API fails
+    let book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
+    let lookupOk = false;
 
-      // Use functional updater to get fresh allBooks state
-      const existing = allBooks.find((b) => b.isbn === isbn);
-      if (existing) {
-        setPendingDuplicate(book);
-        setDuplicate(existing);
-      } else {
-        setPendingBooks((prev) => [...prev, book]);
+    try {
+      const result = await lookupISBN(isbn);
+      if (result) {
+        book = result;
+        lookupOk = true;
       }
-      setIsbnInput('');
-    } catch (err) {
-      setStatus({ message: `Lookup failed: ${err.message}`, type: 'error' });
-    } finally {
-      setIsLookingUp(false);
-      // Always clear processing flag so scanner is immediately ready
-      isProcessingRef.current = false;
+    } catch {
+      // swallow — fallback book used below
     }
+
+    book.dateAdded = new Date().toLocaleDateString('en-IN');
+
+    const existing = allBooks.find((b) => b.isbn === isbn);
+    if (existing) {
+      setPendingDuplicate(book);
+      setDuplicate(existing);
+    } else {
+      setPendingBooks((prev) => [...prev, book]);
+    }
+    setIsbnInput('');
+
+    if (lookupOk) {
+      setStatus({ message: `✓ ${book.title || isbn} — ready for next scan`, type: 'success' });
+    } else {
+      setStatus({ message: `Google Books unavailable — ISBN ${isbn} added, fill details later`, type: 'info' });
+    }
+
+    setIsLookingUp(false);
+    // Always clear immediately so scanner is ready for next book
+    isProcessingRef.current = false;
   }, [allBooks]);
 
   // ZXing callback — runs on every frame that has a barcode

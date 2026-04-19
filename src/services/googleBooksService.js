@@ -1,6 +1,12 @@
 import { getCachedLookup, setCachedLookup } from './storageService.js';
 
 const BASE_URL = 'https://www.googleapis.com/books/v1/volumes';
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function extractBookData(item) {
   const info = item.volumeInfo || {};
@@ -28,7 +34,35 @@ function extractBookData(item) {
   };
 }
 
+async function fetchWithRetry(url, retries = MAX_RETRIES) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+
+      // Retry on server errors (5xx) and rate limits (429)
+      if ((res.status === 503 || res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(RETRY_DELAY_MS * attempt);
+        continue;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Google Books error ${res.status}`);
+      }
+
+      return await res.json();
+    } catch (err) {
+      // Network error — retry if attempts remain
+      if (attempt < retries) {
+        await sleep(RETRY_DELAY_MS * attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 export async function lookupISBN(isbn) {
+  // Return cached result immediately if available
   const cached = await getCachedLookup(isbn);
   if (cached) return cached;
 
@@ -36,11 +70,15 @@ export async function lookupISBN(isbn) {
   const keyParam = apiKey ? `&key=${apiKey}` : '';
   const url = `${BASE_URL}?q=isbn:${isbn}${keyParam}`;
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Google Books API error: ${res.status}`);
+  let json;
+  try {
+    json = await fetchWithRetry(url);
+  } catch {
+    // Network/API completely unavailable — return null so caller adds book manually
+    return null;
+  }
 
-  const json = await res.json();
-  if (!json.items?.length) return null;
+  if (!json?.items?.length) return null;
 
   const bookData = extractBookData(json.items[0]);
   if (!bookData.isbn) bookData.isbn = isbn;
