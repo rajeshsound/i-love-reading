@@ -5,10 +5,7 @@ import { NotFoundException } from '@zxing/library';
 import { lookupISBN } from '../services/googleBooksService.js';
 import BooksTable from './BooksTable.jsx';
 import DuplicateModal from './DuplicateModal.jsx';
-import { appendAndDownload } from '../services/excelService.js';
-import { saveBooks } from '../services/storageService.js';
 
-// How long to ignore the same ISBN after scanning it (prevents double-scan)
 const SAME_ISBN_COOLDOWN_MS = 4000;
 
 function StatusBar({ message, type }) {
@@ -33,14 +30,12 @@ function StatusBar({ message, type }) {
   );
 }
 
-export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
+export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, todayCount }) {
   const [isbnInput, setIsbnInput] = useState('');
-  const [pendingBooks, setPendingBooks] = useState([]);
   const [status, setStatus] = useState({ message: '', type: 'info' });
   const [isCameraOn, setIsCameraOn] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isLookingUp, setIsLookingUp] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [duplicate, setDuplicate] = useState(null);
   const [pendingDuplicate, setPendingDuplicate] = useState(null);
 
@@ -71,19 +66,13 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
     setIsLookingUp(true);
     setStatus({ message: `Looking up ISBN ${isbn}…`, type: 'loading' });
 
-    // Always build a fallback book — scan is never lost even if API fails
     let book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
     let lookupOk = false;
 
     try {
       const result = await lookupISBN(isbn);
-      if (result) {
-        book = result;
-        lookupOk = true;
-      }
-    } catch {
-      // swallow — fallback book used below
-    }
+      if (result) { book = result; lookupOk = true; }
+    } catch { /* fallback book used */ }
 
     book.dateAdded = new Date().toLocaleDateString('en-IN');
 
@@ -92,32 +81,25 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
       setPendingDuplicate(book);
       setDuplicate(existing);
     } else {
-      setPendingBooks((prev) => [...prev, book]);
+      onPendingChange((prev) => [...prev, book]);
     }
     setIsbnInput('');
 
-    if (lookupOk) {
-      setStatus({ message: `✓ ${book.title || isbn} — ready for next scan`, type: 'success' });
-    } else {
-      setStatus({ message: `Google Books unavailable — ISBN ${isbn} added, fill details later`, type: 'info' });
-    }
+    setStatus({
+      message: lookupOk
+        ? `✓ ${book.title || isbn} — ready for next scan`
+        : `Google Books unavailable — ISBN ${isbn} added, fill details later`,
+      type: lookupOk ? 'success' : 'info',
+    });
 
     setIsLookingUp(false);
-    // Always clear immediately so scanner is ready for next book
     isProcessingRef.current = false;
-  }, [allBooks]);
+  }, [allBooks, onPendingChange]);
 
-  // ZXing callback — runs on every frame that has a barcode
-  const onBarcodeDected = useCallback((isbn) => {
+  const onBarcodeDetected = useCallback((isbn) => {
     if (isProcessingRef.current) return;
-
-    // Skip if same ISBN was just scanned recently
     const now = Date.now();
-    if (
-      isbn === lastScannedRef.current.isbn &&
-      now - lastScannedRef.current.time < SAME_ISBN_COOLDOWN_MS
-    ) return;
-
+    if (isbn === lastScannedRef.current.isbn && now - lastScannedRef.current.time < SAME_ISBN_COOLDOWN_MS) return;
     isProcessingRef.current = true;
     lastScannedRef.current = { isbn, time: now };
     setIsbnInput(isbn);
@@ -127,28 +109,22 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
   const startScanning = useCallback(() => {
     if (!videoRef.current || !readerRef.current) return;
     setIsScanning(true);
-
-    // Keep ZXing running continuously — never stop it between scans
     readerRef.current.decodeFromVideoElement(videoRef.current, (result, err, controls) => {
       controlsRef.current = controls;
       if (result) {
         const text = result.getText();
-        if (/^\d{8,13}$/.test(text)) {
-          onBarcodeDected(text);
-        }
+        if (/^\d{8,13}$/.test(text)) onBarcodeDetected(text);
       } else if (err && !(err instanceof NotFoundException)) {
         console.warn('Scan error:', err);
       }
     }).catch(console.error);
-  }, [onBarcodeDected]);
+  }, [onBarcodeDetected]);
 
   const startCamera = async () => {
     try {
       readerRef.current = new BrowserMultiFormatReader();
-
       const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-      const rearDevice = devices.find((d) => /back|rear|environment/i.test(d.label))
-        || devices[devices.length - 1];
+      const rearDevice = devices.find((d) => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
       const deviceId = rearDevice?.deviceId;
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -156,7 +132,6 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           ? { deviceId: { exact: deviceId } }
           : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
       });
-
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.play().catch(console.error);
@@ -167,7 +142,6 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
     }
   };
 
-  // Attach ZXing once video is playing
   useEffect(() => {
     if (!isCameraOn || !videoRef.current) return;
     const video = videoRef.current;
@@ -177,10 +151,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
     return () => video.removeEventListener('loadeddata', onReady);
   }, [isCameraOn, startScanning]);
 
-  const toggleCamera = () => {
-    if (isCameraOn) stopCamera();
-    else startCamera();
-  };
+  const toggleCamera = () => { if (isCameraOn) stopCamera(); else startCamera(); };
 
   const handleManualLookup = () => {
     const isbn = isbnInput.trim().replace(/[^0-9X]/gi, '');
@@ -197,29 +168,12 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
   };
 
   const handleKeyDown = (e) => { if (e.key === 'Enter') handleManualLookup(); };
-  const handleDeletePending = (index) => setPendingBooks((prev) => prev.filter((_, i) => i !== index));
+  const handleDeletePending = (index) => onPendingChange((prev) => prev.filter((_, i) => i !== index));
   const handleDuplicateSkip = () => { setDuplicate(null); setPendingDuplicate(null); };
   const handleDuplicateAddAnyway = () => {
-    if (pendingDuplicate) setPendingBooks((prev) => [...prev, pendingDuplicate]);
+    if (pendingDuplicate) onPendingChange((prev) => [...prev, pendingDuplicate]);
     setDuplicate(null);
     setPendingDuplicate(null);
-  };
-
-  const handleSave = async () => {
-    if (!pendingBooks.length) return;
-    setIsSaving(true);
-    setStatus({ message: 'Saving to Excel…', type: 'loading' });
-    try {
-      const updatedAll = appendAndDownload(allBooks, pendingBooks);
-      await saveBooks(updatedAll);
-      onBooksUpdated(updatedAll);
-      setStatus({ message: `Saved ${pendingBooks.length} book(s) — scanner ready`, type: 'success' });
-      setPendingBooks([]);
-    } catch (err) {
-      setStatus({ message: `Save failed: ${err.message}`, type: 'error' });
-    } finally {
-      setIsSaving(false);
-    }
   };
 
   return (
@@ -244,9 +198,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           <button
             onClick={toggleCamera}
             className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm transition-colors ${
-              isCameraOn
-                ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                : 'bg-katha-500 text-white hover:bg-katha-600'
+              isCameraOn ? 'bg-gray-100 text-gray-600 hover:bg-gray-200' : 'bg-katha-500 text-white hover:bg-katha-600'
             }`}
           >
             {isCameraOn ? <CameraOff size={16} /> : <Camera size={16} />}
@@ -254,10 +206,8 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           </button>
         </div>
 
-        {/* Video — always in DOM when camera on, ZXing runs continuously */}
         <div className={`mb-4 relative bg-black rounded-xl overflow-hidden aspect-video ${isCameraOn ? 'block' : 'hidden'}`}>
           <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
-
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
             <div className="relative w-64 h-28">
               <div className="absolute inset-0 border-2 border-katha-400/60 rounded-lg" />
@@ -268,7 +218,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="bg-black/60 rounded-lg px-3 py-1.5 flex items-center gap-2">
                     <Loader2 size={14} className="text-katha-400 animate-spin" />
-                    <span className="text-white text-xs font-medium">Looking up…</span>
+                    <span className="text-white text-xs font-medium">Adding book…</span>
                   </div>
                 </div>
               )}
@@ -283,7 +233,6 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           </div>
         </div>
 
-        {/* Manual input */}
         <div className="flex gap-2">
           <input
             type="text"
@@ -312,7 +261,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
         )}
       </div>
 
-      <BooksTable books={pendingBooks} onDelete={handleDeletePending} onSave={handleSave} isSaving={isSaving} />
+      <BooksTable books={pendingBooks} onDelete={handleDeletePending} />
 
       {duplicate && pendingDuplicate && (
         <DuplicateModal

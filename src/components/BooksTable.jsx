@@ -1,4 +1,4 @@
-import { Trash2, Save, BookOpen } from 'lucide-react';
+import { Trash2, BookOpen } from 'lucide-react';
 
 function BookRow({ book, onDelete, index }) {
   return (
@@ -23,30 +23,21 @@ function BookRow({ book, onDelete, index }) {
   );
 }
 
-export default function BooksTable({ books, onDelete, onSave, isSaving }) {
+export default function BooksTable({ books, onDelete }) {
   if (!books.length) return null;
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
         <div className="flex items-center gap-2">
           <BookOpen size={16} className="text-katha-500" />
           <span className="text-sm font-semibold text-gray-700">
-            Pending Books ({books.length})
+            Scanned this session ({books.length})
           </span>
         </div>
-        <button
-          onClick={onSave}
-          disabled={isSaving}
-          className="flex items-center gap-1.5 bg-katha-500 hover:bg-katha-600 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-        >
-          <Save size={14} />
-          {isSaving ? 'Saving…' : 'Save to Excel'}
-        </button>
+        <span className="text-xs text-gray-400">Save from top bar ↑</span>
       </div>
 
-      {/* Table */}
       <div className="overflow-x-auto">
         <table className="w-full text-left">
           <thead>

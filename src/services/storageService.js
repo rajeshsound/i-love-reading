@@ -1,7 +1,8 @@
 const DB_NAME = 'KathaScannerDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const BOOKS_STORE = 'books';
 const CACHE_STORE = 'googleBooksCache';
+const PENDING_STORE = 'pendingBooks';
 
 let db = null;
 
@@ -18,11 +19,11 @@ function openDB() {
       if (!d.objectStoreNames.contains(CACHE_STORE)) {
         d.createObjectStore(CACHE_STORE, { keyPath: 'isbn' });
       }
+      if (!d.objectStoreNames.contains(PENDING_STORE)) {
+        d.createObjectStore(PENDING_STORE, { keyPath: 'id' });
+      }
     };
-    req.onsuccess = (e) => {
-      db = e.target.result;
-      resolve(db);
-    };
+    req.onsuccess = (e) => { db = e.target.result; resolve(db); };
     req.onerror = () => reject(req.error);
   });
 }
@@ -83,6 +84,37 @@ export async function setCachedLookup(isbn, data) {
   return new Promise((resolve, reject) => {
     const tx = d.transaction(CACHE_STORE, 'readwrite');
     tx.objectStore(CACHE_STORE).put({ isbn, data, cachedAt: Date.now() });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Pending books — persisted across sessions until explicitly saved to Excel
+export async function getPendingBooks() {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(PENDING_STORE, 'readonly');
+    const req = tx.objectStore(PENDING_STORE).get('session');
+    req.onsuccess = () => resolve(req.result?.books || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function savePendingBooks(books) {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(PENDING_STORE, 'readwrite');
+    tx.objectStore(PENDING_STORE).put({ id: 'session', books });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearPendingBooks() {
+  const d = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(PENDING_STORE, 'readwrite');
+    tx.objectStore(PENDING_STORE).delete('session');
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
