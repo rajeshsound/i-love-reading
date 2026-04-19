@@ -64,6 +64,14 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
+  // Attach stream to video element once it's in the DOM
+  useEffect(() => {
+    if (isCameraOn && streamRef.current && videoRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(console.error);
+    }
+  }, [isCameraOn]);
+
   const startCamera = async () => {
     try {
       // Try rear camera first, fall back to any camera
@@ -76,11 +84,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
         stream = await navigator.mediaDevices.getUserMedia({ video: true });
       }
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => videoRef.current.play();
-      }
-      setIsCameraOn(true);
+      setIsCameraOn(true); // triggers useEffect above which sets srcObject
 
       if (barcodeDetectorRef.current) {
         scanIntervalRef.current = setInterval(async () => {
