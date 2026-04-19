@@ -66,13 +66,19 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
-      });
+      // Try rear camera first, fall back to any camera
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.onloadedmetadata = () => videoRef.current.play();
       }
       setIsCameraOn(true);
 
@@ -218,7 +224,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
         {isCameraOn && (
           <div className="mb-4 relative bg-black rounded-xl overflow-hidden aspect-video">
-            <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
+            <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
             {/* Scan overlay */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="w-56 h-32 border-2 border-katha-400 rounded-lg opacity-70">
