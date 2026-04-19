@@ -8,6 +8,9 @@ import DuplicateModal from './DuplicateModal.jsx';
 import { appendAndDownload } from '../services/excelService.js';
 import { saveBooks } from '../services/storageService.js';
 
+// How long to ignore the same ISBN after scanning it (prevents double-scan)
+const SAME_ISBN_COOLDOWN_MS = 4000;
+
 function StatusBar({ message, type }) {
   if (!message) return null;
   const styles = {
@@ -45,6 +48,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
   const readerRef = useRef(null);
   const controlsRef = useRef(null);
   const isProcessingRef = useRef(false);
+  const lastScannedRef = useRef({ isbn: '', time: 0 });
 
   const stopCamera = useCallback(() => {
     if (controlsRef.current) {
@@ -63,107 +67,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
-  const processBarcode = useCallback(async (rawCode) => {
-    if (isProcessingRef.current) return;
-    const isbn = rawCode.trim().replace(/[^0-9X]/gi, '');
-    if (!isbn || isbn.length < 10) return;
-
-    isProcessingRef.current = true;
-    setIsbnInput(isbn);
-
-    // Pause scanning while looking up
-    if (controlsRef.current) {
-      try { controlsRef.current.stop(); } catch {}
-      controlsRef.current = null;
-    }
-    setIsScanning(false);
-
-    await doLookup(isbn);
-
-    // Resume scanning after 2s
-    setTimeout(() => {
-      isProcessingRef.current = false;
-      if (isCameraOn && videoRef.current) startScanning();
-    }, 2000);
-  }, []); // eslint-disable-line
-
-  const startScanning = useCallback(() => {
-    if (!videoRef.current || !readerRef.current) return;
-    setIsScanning(true);
-    setStatus({ message: 'Point camera at a barcode…', type: 'info' });
-
-    readerRef.current.decodeFromVideoElement(videoRef.current, (result, err, controls) => {
-      controlsRef.current = controls;
-      if (result) {
-        const text = result.getText();
-        // Only accept EAN-13 / EAN-8 / UPC format (digits only, 8-13 chars)
-        if (/^\d{8,13}$/.test(text)) {
-          processBarcode(text);
-        }
-      } else if (err && !(err instanceof NotFoundException)) {
-        console.warn('Scan error:', err);
-      }
-    }).catch(console.error);
-  }, [processBarcode]);
-
-  const startCamera = async () => {
-    try {
-      readerRef.current = new BrowserMultiFormatReader();
-
-      // Get camera stream — prefer rear camera
-      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-      const rearDevice = devices.find((d) =>
-        /back|rear|environment/i.test(d.label)
-      ) || devices[devices.length - 1];
-
-      const deviceId = rearDevice?.deviceId || undefined;
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: deviceId
-          ? { deviceId: { exact: deviceId } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-      });
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(console.error);
-      }
-
-      setIsCameraOn(true);
-    } catch (err) {
-      setStatus({ message: `Camera error: ${err.message}`, type: 'error' });
-    }
-  };
-
-  // Start ZXing scanning once camera is on and video is ready
-  useEffect(() => {
-    if (!isCameraOn || !videoRef.current) return;
-    const video = videoRef.current;
-    const onReady = () => startScanning();
-    video.addEventListener('loadeddata', onReady, { once: true });
-    // If already loaded
-    if (video.readyState >= 3) startScanning();
-    return () => video.removeEventListener('loadeddata', onReady);
-  }, [isCameraOn, startScanning]);
-
-  const toggleCamera = () => {
-    if (isCameraOn) stopCamera();
-    else startCamera();
-  };
-
-  const doLookup = async (rawIsbn) => {
-    const isbn = String(rawIsbn || isbnInput).trim().replace(/[^0-9X]/gi, '');
-    if (!isbn || isbn.length < 10) {
-      setStatus({ message: 'Enter a valid ISBN (10 or 13 digits)', type: 'error' });
-      return;
-    }
-
-    const alreadyPending = pendingBooks.some((b) => b.isbn === isbn);
-    if (alreadyPending) {
-      setStatus({ message: `ISBN ${isbn} is already in the pending list`, type: 'info' });
-      return;
-    }
-
+  const doLookup = useCallback(async (isbn) => {
     setIsLookingUp(true);
     setStatus({ message: `Looking up ISBN ${isbn}…`, type: 'loading' });
 
@@ -173,10 +77,11 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
         book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
         setStatus({ message: `Not found in Google Books — added manually`, type: 'info' });
       } else {
-        setStatus({ message: `Found: ${book.title || isbn}`, type: 'success' });
+        setStatus({ message: `✓ ${book.title || isbn} — ready for next scan`, type: 'success' });
       }
       book.dateAdded = new Date().toLocaleDateString('en-IN');
 
+      // Use functional updater to get fresh allBooks state
       const existing = allBooks.find((b) => b.isbn === isbn);
       if (existing) {
         setPendingDuplicate(book);
@@ -189,13 +94,102 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
       setStatus({ message: `Lookup failed: ${err.message}`, type: 'error' });
     } finally {
       setIsLookingUp(false);
+      // Always clear processing flag so scanner is immediately ready
+      isProcessingRef.current = false;
+    }
+  }, [allBooks]);
+
+  // ZXing callback — runs on every frame that has a barcode
+  const onBarcodeDected = useCallback((isbn) => {
+    if (isProcessingRef.current) return;
+
+    // Skip if same ISBN was just scanned recently
+    const now = Date.now();
+    if (
+      isbn === lastScannedRef.current.isbn &&
+      now - lastScannedRef.current.time < SAME_ISBN_COOLDOWN_MS
+    ) return;
+
+    isProcessingRef.current = true;
+    lastScannedRef.current = { isbn, time: now };
+    setIsbnInput(isbn);
+    doLookup(isbn);
+  }, [doLookup]);
+
+  const startScanning = useCallback(() => {
+    if (!videoRef.current || !readerRef.current) return;
+    setIsScanning(true);
+
+    // Keep ZXing running continuously — never stop it between scans
+    readerRef.current.decodeFromVideoElement(videoRef.current, (result, err, controls) => {
+      controlsRef.current = controls;
+      if (result) {
+        const text = result.getText();
+        if (/^\d{8,13}$/.test(text)) {
+          onBarcodeDected(text);
+        }
+      } else if (err && !(err instanceof NotFoundException)) {
+        console.warn('Scan error:', err);
+      }
+    }).catch(console.error);
+  }, [onBarcodeDected]);
+
+  const startCamera = async () => {
+    try {
+      readerRef.current = new BrowserMultiFormatReader();
+
+      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+      const rearDevice = devices.find((d) => /back|rear|environment/i.test(d.label))
+        || devices[devices.length - 1];
+      const deviceId = rearDevice?.deviceId;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId
+          ? { deviceId: { exact: deviceId } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(console.error);
+      }
+      setIsCameraOn(true);
+    } catch (err) {
+      setStatus({ message: `Camera error: ${err.message}`, type: 'error' });
     }
   };
 
-  const handleLookup = () => doLookup(isbnInput);
-  const handleKeyDown = (e) => { if (e.key === 'Enter') handleLookup(); };
-  const handleDeletePending = (index) => setPendingBooks((prev) => prev.filter((_, i) => i !== index));
+  // Attach ZXing once video is playing
+  useEffect(() => {
+    if (!isCameraOn || !videoRef.current) return;
+    const video = videoRef.current;
+    const onReady = () => startScanning();
+    video.addEventListener('loadeddata', onReady, { once: true });
+    if (video.readyState >= 3) startScanning();
+    return () => video.removeEventListener('loadeddata', onReady);
+  }, [isCameraOn, startScanning]);
 
+  const toggleCamera = () => {
+    if (isCameraOn) stopCamera();
+    else startCamera();
+  };
+
+  const handleManualLookup = () => {
+    const isbn = isbnInput.trim().replace(/[^0-9X]/gi, '');
+    if (!isbn || isbn.length < 10) {
+      setStatus({ message: 'Enter a valid ISBN (10 or 13 digits)', type: 'error' });
+      return;
+    }
+    if (pendingBooks.some((b) => b.isbn === isbn)) {
+      setStatus({ message: `ISBN ${isbn} is already in the pending list`, type: 'info' });
+      return;
+    }
+    isProcessingRef.current = true;
+    doLookup(isbn);
+  };
+
+  const handleKeyDown = (e) => { if (e.key === 'Enter') handleManualLookup(); };
+  const handleDeletePending = (index) => setPendingBooks((prev) => prev.filter((_, i) => i !== index));
   const handleDuplicateSkip = () => { setDuplicate(null); setPendingDuplicate(null); };
   const handleDuplicateAddAnyway = () => {
     if (pendingDuplicate) setPendingBooks((prev) => [...prev, pendingDuplicate]);
@@ -211,7 +205,7 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
       const updatedAll = appendAndDownload(allBooks, pendingBooks);
       await saveBooks(updatedAll);
       onBooksUpdated(updatedAll);
-      setStatus({ message: `Saved ${pendingBooks.length} book(s) to BookInventory.xlsx`, type: 'success' });
+      setStatus({ message: `Saved ${pendingBooks.length} book(s) — scanner ready`, type: 'success' });
       setPendingBooks([]);
     } catch (err) {
       setStatus({ message: `Save failed: ${err.message}`, type: 'error' });
@@ -238,7 +232,6 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
       {/* Scanner card */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        {/* Camera toggle */}
         <div className="mb-4">
           <button
             onClick={toggleCamera}
@@ -253,27 +246,31 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           </button>
         </div>
 
-        {/* Video feed — always in DOM when camera is on */}
+        {/* Video — always in DOM when camera on, ZXing runs continuously */}
         <div className={`mb-4 relative bg-black rounded-xl overflow-hidden aspect-video ${isCameraOn ? 'block' : 'hidden'}`}>
           <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
 
-          {/* Scanning overlay */}
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-            {/* Viewfinder */}
             <div className="relative w-64 h-28">
               <div className="absolute inset-0 border-2 border-katha-400/60 rounded-lg" />
-              {/* Animated scan line */}
-              {isScanning && (
+              {isScanning && !isLookingUp && (
                 <div className="absolute left-1 right-1 h-0.5 bg-katha-400 rounded animate-scan-line" />
               )}
-              {/* Corner brackets */}
+              {isLookingUp && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="bg-black/60 rounded-lg px-3 py-1.5 flex items-center gap-2">
+                    <Loader2 size={14} className="text-katha-400 animate-spin" />
+                    <span className="text-white text-xs font-medium">Looking up…</span>
+                  </div>
+                </div>
+              )}
               <div className="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-katha-400 rounded-tl" />
               <div className="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-katha-400 rounded-tr" />
               <div className="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-katha-400 rounded-bl" />
               <div className="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-katha-400 rounded-br" />
             </div>
             <p className="mt-3 text-white/80 text-xs bg-black/40 px-3 py-1 rounded-full">
-              {isScanning ? 'Scanning for barcode…' : 'Starting camera…'}
+              {isLookingUp ? 'Adding book…' : 'Point at barcode — auto scans'}
             </p>
           </div>
         </div>
@@ -287,11 +284,11 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
             value={isbnInput}
             onChange={(e) => setIsbnInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Or enter ISBN manually (10 or 13 digits)"
+            placeholder="Or enter ISBN manually"
             className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-katha-400 focus:border-transparent"
           />
           <button
-            onClick={handleLookup}
+            onClick={handleManualLookup}
             disabled={isLookingUp || !isbnInput.trim()}
             className="bg-katha-500 hover:bg-katha-600 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl transition-colors flex items-center gap-1.5 text-sm font-semibold"
           >
