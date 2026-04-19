@@ -3,6 +3,16 @@ export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
+      keyframes: {
+        'scan-line': {
+          '0%': { top: '4px' },
+          '50%': { top: 'calc(100% - 4px)' },
+          '100%': { top: '4px' },
+        },
+      },
+      animation: {
+        'scan-line': 'scan-line 1.8s ease-in-out infinite',
+      },
       colors: {
         katha: {
           50: '#fef7ee',
