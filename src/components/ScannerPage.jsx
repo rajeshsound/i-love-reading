@@ -45,6 +45,12 @@ export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, t
   const isProcessingRef = useRef(false);
   const lastScannedRef = useRef({ isbn: '', time: 0 });
 
+  // Refs so doLookup can read the latest books without being a dependency
+  const allBooksRef = useRef(allBooks);
+  const pendingBooksRef = useRef(pendingBooks);
+  useEffect(() => { allBooksRef.current = allBooks; }, [allBooks]);
+  useEffect(() => { pendingBooksRef.current = pendingBooks; }, [pendingBooks]);
+
   const stopCamera = useCallback(() => {
     if (controlsRef.current) {
       try { controlsRef.current.stop(); } catch {}
@@ -76,25 +82,29 @@ export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, t
 
     book.dateAdded = new Date().toLocaleDateString('en-IN');
 
-    const existing = allBooks.find((b) => b.isbn === isbn);
+    // Check both saved inventory AND current session for duplicates
+    const existing =
+      allBooksRef.current.find((b) => b.isbn === isbn) ||
+      pendingBooksRef.current.find((b) => b.isbn === isbn);
+
     if (existing) {
       setPendingDuplicate(book);
       setDuplicate(existing);
+      setStatus({ message: `Duplicate detected — ISBN ${isbn} already exists`, type: 'error' });
     } else {
       onPendingChange((prev) => [book, ...prev]); // newest first
+      setStatus({
+        message: lookupOk
+          ? `✓ ${book.title || isbn} — ready for next scan`
+          : `Google Books unavailable — ISBN ${isbn} added, fill details later`,
+        type: lookupOk ? 'success' : 'info',
+      });
     }
     setIsbnInput('');
 
-    setStatus({
-      message: lookupOk
-        ? `✓ ${book.title || isbn} — ready for next scan`
-        : `Google Books unavailable — ISBN ${isbn} added, fill details later`,
-      type: lookupOk ? 'success' : 'info',
-    });
-
     setIsLookingUp(false);
     isProcessingRef.current = false;
-  }, [allBooks, onPendingChange]);
+  }, [onPendingChange]); // stable — reads books via refs, not deps
 
   const onBarcodeDetected = useCallback((isbn) => {
     if (isProcessingRef.current) return;
@@ -159,10 +169,7 @@ export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, t
       setStatus({ message: 'Enter a valid ISBN (10 or 13 digits)', type: 'error' });
       return;
     }
-    if (pendingBooks.some((b) => b.isbn === isbn)) {
-      setStatus({ message: `ISBN ${isbn} is already in the pending list`, type: 'info' });
-      return;
-    }
+    // Don't block here — doLookup checks both lists and shows modal if duplicate
     isProcessingRef.current = true;
     doLookup(isbn);
   };
