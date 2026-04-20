@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Camera, CameraOff, Search, Loader2, CheckCircle, XCircle, Hash } from 'lucide-react';
+import { BrowserMultiFormatReader } from '@zxing/browser';
+import { NotFoundException } from '@zxing/library';
 import { lookupISBN } from '../services/googleBooksService.js';
 import BooksTable from './BooksTable.jsx';
 import DuplicateModal from './DuplicateModal.jsx';
-import { appendAndDownload } from '../services/excelService.js';
-import { saveBooks } from '../services/storageService.js';
 
-const SCAN_INTERVAL_MS = 800;
+const SAME_ISBN_COOLDOWN_MS = 4000;
 
 function StatusBar({ message, type }) {
   if (!message) return null;
@@ -30,157 +30,163 @@ function StatusBar({ message, type }) {
   );
 }
 
-export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
+export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, todayCount }) {
   const [isbnInput, setIsbnInput] = useState('');
-  const [pendingBooks, setPendingBooks] = useState([]);
   const [status, setStatus] = useState({ message: '', type: 'info' });
   const [isCameraOn, setIsCameraOn] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [isLookingUp, setIsLookingUp] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [duplicate, setDuplicate] = useState(null);
   const [pendingDuplicate, setPendingDuplicate] = useState(null);
 
   const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const scanIntervalRef = useRef(null);
-  const barcodeDetectorRef = useRef(null);
+  const readerRef = useRef(null);
+  const controlsRef = useRef(null);
+  const isProcessingRef = useRef(false);
+  const lastScannedRef = useRef({ isbn: '', time: 0 });
 
-  // Init BarcodeDetector if available
-  useEffect(() => {
-    if ('BarcodeDetector' in window) {
-      barcodeDetectorRef.current = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e'] });
-    }
-  }, []);
+  // Refs so doLookup can read the latest books without being a dependency
+  const allBooksRef = useRef(allBooks);
+  const pendingBooksRef = useRef(pendingBooks);
+  useEffect(() => { allBooksRef.current = allBooks; }, [allBooks]);
+  useEffect(() => { pendingBooksRef.current = pendingBooks; }, [pendingBooks]);
 
   const stopCamera = useCallback(() => {
-    clearInterval(scanIntervalRef.current);
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+    if (controlsRef.current) {
+      try { controlsRef.current.stop(); } catch {}
+      controlsRef.current = null;
     }
-    if (videoRef.current) videoRef.current.srcObject = null;
+    if (videoRef.current) {
+      const stream = videoRef.current.srcObject;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      videoRef.current.srcObject = null;
+    }
+    isProcessingRef.current = false;
     setIsCameraOn(false);
+    setIsScanning(false);
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
+  const doLookup = useCallback(async (isbn) => {
+    setIsLookingUp(true);
+    setStatus({ message: `Looking up ISBN ${isbn}…`, type: 'loading' });
+
+    let book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
+    let lookupOk = false;
+    let lookupError = null;
+
+    try {
+      const result = await lookupISBN(isbn);
+      if (result) { book = result; lookupOk = true; }
+    } catch (err) {
+      lookupError = err.message || 'Unknown error';
+      console.error('Google Books lookup failed:', err);
+    }
+
+    book.dateAdded = new Date().toLocaleDateString('en-IN');
+
+    // Check both saved inventory AND current session for duplicates
+    const existing =
+      allBooksRef.current.find((b) => b.isbn === isbn) ||
+      pendingBooksRef.current.find((b) => b.isbn === isbn);
+
+    if (existing) {
+      setPendingDuplicate(book);
+      setDuplicate(existing);
+      setStatus({ message: `Duplicate detected — ISBN ${isbn} already exists`, type: 'error' });
+    } else {
+      onPendingChange((prev) => [book, ...prev]); // newest first
+      setStatus({
+        message: lookupOk
+          ? `✓ ${book.title || isbn} — ready for next scan`
+          : lookupError
+          ? `Fetch failed: ${lookupError} — ISBN ${isbn} added, fill details later`
+          : `Not found in Google Books — ISBN ${isbn} added, fill details later`,
+        type: lookupOk ? 'success' : lookupError ? 'error' : 'info',
+      });
+    }
+    setIsbnInput('');
+
+    setIsLookingUp(false);
+    isProcessingRef.current = false;
+  }, [onPendingChange]); // stable — reads books via refs, not deps
+
+  const onBarcodeDetected = useCallback((isbn) => {
+    if (isProcessingRef.current) return;
+    const now = Date.now();
+    if (isbn === lastScannedRef.current.isbn && now - lastScannedRef.current.time < SAME_ISBN_COOLDOWN_MS) return;
+    isProcessingRef.current = true;
+    lastScannedRef.current = { isbn, time: now };
+    setIsbnInput(isbn);
+    doLookup(isbn);
+  }, [doLookup]);
+
+  const startScanning = useCallback(() => {
+    if (!videoRef.current || !readerRef.current) return;
+    setIsScanning(true);
+    readerRef.current.decodeFromVideoElement(videoRef.current, (result, err, controls) => {
+      controlsRef.current = controls;
+      if (result) {
+        const text = result.getText();
+        if (/^\d{8,13}$/.test(text)) onBarcodeDetected(text);
+      } else if (err && !(err instanceof NotFoundException)) {
+        console.warn('Scan error:', err);
+      }
+    }).catch(console.error);
+  }, [onBarcodeDetected]);
+
   const startCamera = async () => {
     try {
+      readerRef.current = new BrowserMultiFormatReader();
+      const devices = await BrowserMultiFormatReader.listVideoInputDevices();
+      const rearDevice = devices.find((d) => /back|rear|environment/i.test(d.label)) || devices[devices.length - 1];
+      const deviceId = rearDevice?.deviceId;
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: deviceId
+          ? { deviceId: { exact: deviceId } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
       });
-      streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.play().catch(console.error);
       }
       setIsCameraOn(true);
-
-      if (barcodeDetectorRef.current) {
-        scanIntervalRef.current = setInterval(async () => {
-          if (!videoRef.current || videoRef.current.readyState < 2) return;
-          try {
-            const barcodes = await barcodeDetectorRef.current.detect(videoRef.current);
-            if (barcodes.length > 0) {
-              const code = barcodes[0].rawValue;
-              if (/^\d{10,13}$/.test(code)) {
-                clearInterval(scanIntervalRef.current);
-                setIsbnInput(code);
-                await handleLookup(code);
-              }
-            }
-          } catch {}
-        }, SCAN_INTERVAL_MS);
-      } else {
-        setStatus({ message: 'Camera active — enter ISBN manually (barcode detection not supported on this browser)', type: 'info' });
-      }
     } catch (err) {
       setStatus({ message: `Camera error: ${err.message}`, type: 'error' });
     }
   };
 
-  const toggleCamera = () => {
-    if (isCameraOn) stopCamera();
-    else startCamera();
-  };
+  useEffect(() => {
+    if (!isCameraOn || !videoRef.current) return;
+    const video = videoRef.current;
+    const onReady = () => startScanning();
+    video.addEventListener('loadeddata', onReady, { once: true });
+    if (video.readyState >= 3) startScanning();
+    return () => video.removeEventListener('loadeddata', onReady);
+  }, [isCameraOn, startScanning]);
 
-  const handleLookup = async (rawIsbn) => {
-    const isbn = String(rawIsbn || isbnInput).trim().replace(/[^0-9X]/gi, '');
+  const toggleCamera = () => { if (isCameraOn) stopCamera(); else startCamera(); };
+
+  const handleManualLookup = () => {
+    const isbn = isbnInput.trim().replace(/[^0-9X]/gi, '');
     if (!isbn || isbn.length < 10) {
       setStatus({ message: 'Enter a valid ISBN (10 or 13 digits)', type: 'error' });
       return;
     }
-
-    const alreadyPending = pendingBooks.some((b) => b.isbn === isbn);
-    if (alreadyPending) {
-      setStatus({ message: `ISBN ${isbn} is already in the pending list`, type: 'info' });
-      return;
-    }
-
-    setIsLookingUp(true);
-    setStatus({ message: `Looking up ISBN ${isbn}…`, type: 'loading' });
-
-    try {
-      let book = await lookupISBN(isbn);
-      if (!book) {
-        book = { isbn, title: '', author: '', language: '', mrp: '', publisher: '', year: '' };
-        setStatus({ message: `ISBN ${isbn} not found in Google Books — added manually`, type: 'info' });
-      } else {
-        setStatus({ message: `Found: ${book.title || isbn}`, type: 'success' });
-      }
-      book.dateAdded = new Date().toLocaleDateString('en-IN');
-
-      const existing = allBooks.find((b) => b.isbn === isbn);
-      if (existing) {
-        setPendingDuplicate(book);
-        setDuplicate(existing);
-      } else {
-        setPendingBooks((prev) => [...prev, book]);
-      }
-      setIsbnInput('');
-    } catch (err) {
-      setStatus({ message: `Lookup failed: ${err.message}`, type: 'error' });
-    } finally {
-      setIsLookingUp(false);
-    }
+    // Don't block here — doLookup checks both lists and shows modal if duplicate
+    isProcessingRef.current = true;
+    doLookup(isbn);
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') handleLookup();
-  };
-
-  const handleDeletePending = (index) => {
-    setPendingBooks((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleDuplicateSkip = () => {
-    setDuplicate(null);
-    setPendingDuplicate(null);
-  };
-
+  const handleKeyDown = (e) => { if (e.key === 'Enter') handleManualLookup(); };
+  const handleDeletePending = (index) => onPendingChange((prev) => prev.filter((_, i) => i !== index));
+  const handleDuplicateSkip = () => { setDuplicate(null); setPendingDuplicate(null); };
   const handleDuplicateAddAnyway = () => {
-    if (pendingDuplicate) {
-      setPendingBooks((prev) => [...prev, pendingDuplicate]);
-    }
+    if (pendingDuplicate) onPendingChange((prev) => [pendingDuplicate, ...prev]); // newest first
     setDuplicate(null);
     setPendingDuplicate(null);
-  };
-
-  const handleSave = async () => {
-    if (!pendingBooks.length) return;
-    setIsSaving(true);
-    setStatus({ message: 'Saving to Excel…', type: 'loading' });
-    try {
-      const updatedAll = appendAndDownload(allBooks, pendingBooks);
-      await saveBooks(updatedAll);
-      onBooksUpdated(updatedAll);
-      setStatus({ message: `Saved ${pendingBooks.length} book(s) to BookInventory.xlsx`, type: 'success' });
-      setPendingBooks([]);
-    } catch (err) {
-      setStatus({ message: `Save failed: ${err.message}`, type: 'error' });
-    } finally {
-      setIsSaving(false);
-    }
   };
 
   return (
@@ -201,14 +207,11 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
 
       {/* Scanner card */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        {/* Camera */}
         <div className="mb-4">
           <button
             onClick={toggleCamera}
             className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm transition-colors ${
-              isCameraOn
-                ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                : 'bg-katha-500 text-white hover:bg-katha-600'
+              isCameraOn ? 'bg-gray-100 text-gray-600 hover:bg-gray-200' : 'bg-katha-500 text-white hover:bg-katha-600'
             }`}
           >
             {isCameraOn ? <CameraOff size={16} /> : <Camera size={16} />}
@@ -216,22 +219,33 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           </button>
         </div>
 
-        {isCameraOn && (
-          <div className="mb-4 relative bg-black rounded-xl overflow-hidden aspect-video">
-            <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
-            {/* Scan overlay */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-56 h-32 border-2 border-katha-400 rounded-lg opacity-70">
-                <div className="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-katha-400 rounded-tl-lg -mt-0.5 -ml-0.5" />
-                <div className="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-katha-400 rounded-tr-lg -mt-0.5 -mr-0.5" />
-                <div className="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-katha-400 rounded-bl-lg -mb-0.5 -ml-0.5" />
-                <div className="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-katha-400 rounded-br-lg -mb-0.5 -mr-0.5" />
-              </div>
+        <div className={`mb-4 relative bg-black rounded-xl overflow-hidden aspect-video ${isCameraOn ? 'block' : 'hidden'}`}>
+          <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            <div className="relative w-64 h-28">
+              <div className="absolute inset-0 border-2 border-katha-400/60 rounded-lg" />
+              {isScanning && !isLookingUp && (
+                <div className="absolute left-1 right-1 h-0.5 bg-katha-400 rounded animate-scan-line" />
+              )}
+              {isLookingUp && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="bg-black/60 rounded-lg px-3 py-1.5 flex items-center gap-2">
+                    <Loader2 size={14} className="text-katha-400 animate-spin" />
+                    <span className="text-white text-xs font-medium">Adding book…</span>
+                  </div>
+                </div>
+              )}
+              <div className="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-katha-400 rounded-tl" />
+              <div className="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-katha-400 rounded-tr" />
+              <div className="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-katha-400 rounded-bl" />
+              <div className="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-katha-400 rounded-br" />
             </div>
+            <p className="mt-3 text-white/80 text-xs bg-black/40 px-3 py-1 rounded-full">
+              {isLookingUp ? 'Adding book…' : 'Point at barcode — auto scans'}
+            </p>
           </div>
-        )}
+        </div>
 
-        {/* Manual input */}
         <div className="flex gap-2">
           <input
             type="text"
@@ -240,11 +254,11 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
             value={isbnInput}
             onChange={(e) => setIsbnInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Enter ISBN (10 or 13 digits)"
+            placeholder="Or enter ISBN manually"
             className="flex-1 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-katha-400 focus:border-transparent"
           />
           <button
-            onClick={() => handleLookup()}
+            onClick={handleManualLookup}
             disabled={isLookingUp || !isbnInput.trim()}
             className="bg-katha-500 hover:bg-katha-600 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl transition-colors flex items-center gap-1.5 text-sm font-semibold"
           >
@@ -253,7 +267,6 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
           </button>
         </div>
 
-        {/* Status */}
         {status.message && (
           <div className="mt-3">
             <StatusBar message={status.message} type={status.type} />
@@ -261,10 +274,8 @@ export default function ScannerPage({ allBooks, onBooksUpdated, todayCount }) {
         )}
       </div>
 
-      {/* Pending table */}
-      <BooksTable books={pendingBooks} onDelete={handleDeletePending} onSave={handleSave} isSaving={isSaving} />
+      <BooksTable books={pendingBooks} onDelete={handleDeletePending} />
 
-      {/* Duplicate modal */}
       {duplicate && pendingDuplicate && (
         <DuplicateModal
           newBook={pendingDuplicate}
