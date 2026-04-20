@@ -81,7 +81,7 @@ export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, t
       setPendingDuplicate(book);
       setDuplicate(existing);
     } else {
-      onPendingChange((prev) => [...prev, book]);
+      onPendingChange((prev) => [book, ...prev]); // newest first
     }
     setIsbnInput('');
 
@@ -171,7 +171,7 @@ export default function ScannerPage({ allBooks, pendingBooks, onPendingChange, t
   const handleDeletePending = (index) => onPendingChange((prev) => prev.filter((_, i) => i !== index));
   const handleDuplicateSkip = () => { setDuplicate(null); setPendingDuplicate(null); };
   const handleDuplicateAddAnyway = () => {
-    if (pendingDuplicate) onPendingChange((prev) => [...prev, pendingDuplicate]);
+    if (pendingDuplicate) onPendingChange((prev) => [pendingDuplicate, ...prev]); // newest first
     setDuplicate(null);
     setPendingDuplicate(null);
   };
