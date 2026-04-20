@@ -35,6 +35,8 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          VITE_BASE_URL: /i-love-reading/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
