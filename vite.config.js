@@ -12,6 +12,7 @@ export default defineConfig({
         manualChunks: {
           xlsx: ['xlsx'],
           react: ['react', 'react-dom'],
+          pdfjs: ['pdfjs-dist'],
         },
       },
     },

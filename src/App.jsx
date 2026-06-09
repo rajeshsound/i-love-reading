@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import LoginPage from './components/LoginPage.jsx';
 import ScannerPage from './components/ScannerPage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
@@ -12,10 +12,13 @@ import {
 import {
   generateSuggestedName, saveWithFilePicker, saveToExistingHandle, saveAsDownload,
 } from './services/excelService.js';
-import { ScanLine, Settings, BookOpen } from 'lucide-react';
+import { ScanLine, Settings, BookOpen, BookMarked } from 'lucide-react';
+
+const FlipbookPage = lazy(() => import('./components/FlipbookPage.jsx'));
 
 const TAB_SCANNER = 'scanner';
 const TAB_SETTINGS = 'settings';
+const TAB_FLIPBOOK = 'flipbook';
 const SAVED_FILE_KEY = 'katha-saved-filename';
 const USER_NAME_KEY = 'katha-username';
 
@@ -223,12 +226,22 @@ export default function App() {
             savedFileName={savedFileName}
           />
         )}
+        {activeTab === TAB_FLIPBOOK && (
+          <Suspense fallback={
+            <div className="flex items-center justify-center min-h-[70vh]">
+              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-katha-500" />
+            </div>
+          }>
+            <FlipbookPage />
+          </Suspense>
+        )}
       </main>
 
       <nav className="fixed bottom-0 inset-x-0 bg-white border-t border-gray-200 z-40">
         <div className="max-w-2xl mx-auto flex">
           {[
             { id: TAB_SCANNER, icon: ScanLine, label: 'Scanner' },
+            { id: TAB_FLIPBOOK, icon: BookMarked, label: 'Flipbook' },
             { id: TAB_SETTINGS, icon: Settings, label: 'Settings' },
           ].map(({ id, icon: Icon, label }) => (
             <button

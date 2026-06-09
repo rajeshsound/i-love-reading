@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - claude/book-scanner-pwa-Qm0xj
+      - claude/pdf-flipbook-converter-0qvb65
 
   workflow_dispatch:
 
