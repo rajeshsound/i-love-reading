@@ -9,9 +9,19 @@ export default {
           '50%': { top: 'calc(100% - 4px)' },
           '100%': { top: '4px' },
         },
+        'flip-forward': {
+          '0%': { transform: 'rotateY(0deg)', zIndex: '20' },
+          '100%': { transform: 'rotateY(-180deg)', zIndex: '20' },
+        },
+        'flip-backward': {
+          '0%': { transform: 'rotateY(0deg)', zIndex: '20' },
+          '100%': { transform: 'rotateY(180deg)', zIndex: '20' },
+        },
       },
       animation: {
         'scan-line': 'scan-line 1.8s ease-in-out infinite',
+        'flip-forward': 'flip-forward 0.5s ease-in-out forwards',
+        'flip-backward': 'flip-backward 0.5s ease-in-out forwards',
       },
       colors: {
         katha: {
